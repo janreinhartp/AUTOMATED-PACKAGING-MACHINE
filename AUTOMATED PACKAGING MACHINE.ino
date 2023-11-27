@@ -1,14 +1,53 @@
 #include <Arduino.h>
-#include "U8g2lib.h"
 #include "control.h"
 #include <AccelStepper.h>
 #include <EEPROMex.h>
+#include <HX711.h>
+#include <U8g2lib.h>
 
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE);
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+
+#define DOUT A0
+#define CLK A1
+
+HX711 scale;
+
+float CALIBRATION_FACTOR = 0;
+float KNOWN_WEIGHT = 0;
+
+int currentWeight = 0;
+
+void setScale()
+{
+	scale.begin(DOUT, CLK);
+	scale.set_scale(CALIBRATION_FACTOR);
+	scale.tare();
+}
+
+void setCalibrationToZero()
+{
+	scale.set_scale();
+	scale.tare();
+}
+
+float getCalibration(float weight)
+{
+	float reading = scale.get_units(10);
+	return reading / weight;
+}
+
+
 
 // Declaration of LCD Variables
 const int NUM_MAIN_ITEMS = 3;
-const int NUM_SETTING_ITEMS = 7;
+const int NUM_SETTING_ITEMS = 8;
 const int NUM_TESTMACHINE_ITEMS = 8;
 const int MAX_ITEM_LENGTH = 20; // maximum characters for the item name
 
@@ -18,6 +57,7 @@ char menu_items[NUM_MAIN_ITEMS][MAX_ITEM_LENGTH] = { // array with item names
 	{"TEST MACHINE"}};
 
 char setting_items[NUM_SETTING_ITEMS][MAX_ITEM_LENGTH] = { // array with item names
+	{"SCALE"},
 	{"LINEAR"},
 	{"STEPPER"},
 	{"SEALER 1"},
@@ -26,34 +66,37 @@ char setting_items[NUM_SETTING_ITEMS][MAX_ITEM_LENGTH] = { // array with item na
 	{"HEATER 2"},
 	{"SAVE"}};
 
-int parametersTimer[NUM_SETTING_ITEMS] = {1, 1, 1, 1, 1, 1, 1};
-int parametersTimerMaxValue[NUM_SETTING_ITEMS] = {1200, 1200, 1200, 1200, 1200, 1200, 1200};
+int parametersTimer[NUM_SETTING_ITEMS] = {1, 1, 1, 1, 1, 1, 1, 1};
+int parametersTimerMaxValue[NUM_SETTING_ITEMS] = {100000, 1200, 1200, 1200, 1200, 1200, 1200, 1200};
 
-int LinearAdd = 10;
-int StepperTimeAdd = 20;
-int Sealer1TimeAdd = 30;
-int Sealer2TimeAdd = 40;
-int Heater1TimeAdd = 50;
-int Heater2TimeAdd = 60;
+int CalibrationAdd = 10;
+int LinearAdd = 20;
+int StepperTimeAdd = 30;
+int Sealer1TimeAdd = 40;
+int Sealer2TimeAdd = 50;
+int Heater1TimeAdd = 60;
+int Heater2TimeAdd = 70;
 
 void saveSettings()
 {
-	EEPROM.writeDouble(LinearAdd, parametersTimer[0]);
-	EEPROM.writeDouble(StepperTimeAdd, parametersTimer[1]);
-	EEPROM.writeDouble(Sealer1TimeAdd, parametersTimer[2]);
-	EEPROM.writeDouble(Sealer2TimeAdd, parametersTimer[3]);
-	EEPROM.writeDouble(Heater1TimeAdd, parametersTimer[4]);
-	EEPROM.writeDouble(Heater2TimeAdd, parametersTimer[5]);
+	EEPROM.writeDouble(CalibrationAdd, parametersTimer[0]);
+	EEPROM.writeDouble(LinearAdd, parametersTimer[1]);
+	EEPROM.writeDouble(StepperTimeAdd, parametersTimer[2]);
+	EEPROM.writeDouble(Sealer1TimeAdd, parametersTimer[3]);
+	EEPROM.writeDouble(Sealer2TimeAdd, parametersTimer[4]);
+	EEPROM.writeDouble(Heater1TimeAdd, parametersTimer[5]);
+	EEPROM.writeDouble(Heater2TimeAdd, parametersTimer[6]);
 }
 
 void loadSettings()
 {
-	parametersTimer[0] = EEPROM.readDouble(LinearAdd);
-	parametersTimer[1] = EEPROM.readDouble(StepperTimeAdd);
-	parametersTimer[2] = EEPROM.readDouble(Sealer1TimeAdd);
-	parametersTimer[3] = EEPROM.readDouble(Sealer2TimeAdd);
-	parametersTimer[4] = EEPROM.readDouble(Heater1TimeAdd);
-	parametersTimer[5] = EEPROM.readDouble(Heater2TimeAdd);
+	parametersTimer[0] = EEPROM.readDouble(CalibrationAdd);
+	parametersTimer[1] = EEPROM.readDouble(LinearAdd);
+	parametersTimer[2] = EEPROM.readDouble(StepperTimeAdd);
+	parametersTimer[3] = EEPROM.readDouble(Sealer1TimeAdd);
+	parametersTimer[4] = EEPROM.readDouble(Sealer2TimeAdd);
+	parametersTimer[5] = EEPROM.readDouble(Heater1TimeAdd);
+	parametersTimer[6] = EEPROM.readDouble(Heater2TimeAdd);
 }
 
 char *secondsToHHMMSS(int total_seconds)
@@ -103,8 +146,10 @@ int testmachine_item_sel_previous;
 int testmachine_item_sel_next;
 
 bool settingEditFlag = false;
+bool calibrateFlag = false;
 
 int current_screen = 0; // 0 = menu, 1 = screenshot, 2 = qr
+int calibrate_screen = 0;
 
 int ena1 = 25;
 int dir1 = 26;
@@ -797,7 +842,7 @@ void controls()
 				{
 					setting_item_selected = setting_item_selected - 1;
 					button_down_clicked = 1;
-					if (setting_item_selected < 0 )
+					if (setting_item_selected < 0)
 					{
 						setting_item_selected = NUM_SETTING_ITEMS - 1;
 					}
@@ -844,7 +889,6 @@ void controls()
 		}
 	}
 
-
 	if ((digitalRead(BUTTON_SELECT_PIN) == LOW) && (button_select_clicked == 0))
 	{							   // select button clicked, jump between screens
 		button_select_clicked = 1; // set button to clicked to only perform the action once
@@ -880,6 +924,22 @@ void controls()
 				item_selected = 0;
 				saveSettings();
 				setTimers();
+			}
+			else if (setting_item_selected == 0)
+			{
+				if (setting_item_selected == 0 && calibrateFlag == false)
+				{
+					calibrateFlag = true;
+				}
+				else
+				{
+					if (setting_item_selected == 0 && calibrateFlag == true && calibrate_screen == 0)
+					{
+					}
+					else if (setting_item_selected == 0 && calibrateFlag == true && calibrate_screen == 1)
+					{
+					}
+				}
 			}
 			else
 			{
@@ -999,7 +1059,7 @@ void printScreen()
 	{ // MENU SCREEN
 		if (current_screen == 0 && RunAutoFlag == true)
 		{
-			printRunAuto("Test", 50);
+			printRunAuto("Test", currentWeight);
 		}
 		else
 		{
@@ -1340,9 +1400,12 @@ void loop()
 {
 	printScreen();
 	controls();
-	if(TestMachineFlag == true){
+	if (TestMachineFlag == true)
+	{
 		RunTestMachine();
 	}
+	currentWeight = scale.get_units(10);
+
 }
 
 void printRunAuto(String job, int weight)
