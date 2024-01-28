@@ -4,6 +4,7 @@
 #include <EEPROMex.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <ezButton.h>
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 byte enterChar[] = {
@@ -192,10 +193,46 @@ Control Discharge(45, 100, 100);
 Control AfterDispenseTimer(100, 100, 100);
 Control AfterLinearTimer(100, 100, 100);
 
-const int loadFeedback = A10;
-const int dischargeFeedback = A11;
+ezButton loadFeedback(A10);
+ezButton dischargeFeedback(A11);
+bool loadFeedbackFlag, dischargeFeedbackFlag = false;
+
 bool loadStatus, dischargeStatus = false;
 
+void readFeedbackStatus()
+{
+	loadFeedback.loop();
+	dischargeFeedback.loop();
+	if (loadFeedback.isPressed())
+	{
+		Serial.println("loadFeedback pressed");
+		loadFeedbackFlag = true;
+	}
+
+	if (loadFeedback.isReleased())
+	{
+		Serial.println("loadFeedback release");
+		loadFeedbackFlag = false;
+	}
+
+	if (dischargeFeedback.isPressed())
+	{
+		Serial.println("dischargeFeedback pressed");
+		dischargeFeedbackFlag = true;
+	}
+
+	if (dischargeFeedback.isReleased())
+	{
+		Serial.println("dischargeFeedback release");
+		dischargeFeedbackFlag = false;
+	}
+}
+
+bool RunAutoFlag = false;
+int RunAutoSequence = 0;
+bool sealingRunFlag = false;
+int RunAutoBatching = 0;
+bool sealingDone = false;
 void stopAll()
 {
 	DisableStepper();
@@ -221,6 +258,11 @@ void stopAll()
 	Heater2.stop();
 	Heater1.relayOff();
 	Heater2.relayOff();
+
+	RunAutoSequence = 0;
+	sealingRunFlag = false;
+	RunAutoBatching = 0;
+	sealingDone = false;
 }
 
 void setTimers()
@@ -261,12 +303,9 @@ void RunTestMachine()
 	Sealer2.run();
 }
 
-bool RunAutoFlag = false;
-int RunAutoSequence = 0;
-
 void RunAuto()
 {
-	switch (RunAutoSequence)
+	switch (RunAutoBatching)
 	{
 	case 0:
 		RunAutoStart();
@@ -276,29 +315,46 @@ void RunAuto()
 		break;
 	case 2:
 		RunAutoAfterDispenseTimer();
+
 		break;
 	case 3:
-		RunAutoLinearDischarge();
+		if (sealingDone == true)
+		{
+			sealingDone = false;
+			Discharge.start();
+			RunAutoBatching = 4;
+		}
 		break;
 	case 4:
-		RunAutoDischarge();
+		RunAutoLinearDischarge();
 		break;
 	case 5:
-		RunAutAfterDischargeTimer();
+		RunAutoDischarge();
 		break;
 	case 6:
-		RunAutoStepper();
-		break;
-	case 7:
-		RunAutoUpperSeal();
-		break;
-	case 8:
-		RunAutoLowerSeal();
-		break;
+		RunAutAfterDischargeTimer();
 	default:
-		stopAll();
-		RunAutoFlag = false;
 		break;
+	}
+
+	if (sealingRunFlag == true)
+	{
+		switch (RunAutoSequence)
+		{
+		case 0:
+			RunAutoStepper();
+			break;
+		case 1:
+			RunAutoUpperSeal();
+			break;
+		case 2:
+			RunAutoLowerSeal();
+			break;
+		default:
+			stopAll();
+			RunAutoFlag = false;
+			break;
+		}
 	}
 }
 
@@ -307,23 +363,23 @@ void RunAutoStart()
 	Start.run();
 	if (Start.isTimerCompleted() == true)
 	{
-		if (digitalRead(loadFeedback) == false)
+		if (loadFeedbackFlag)
 		{
-			RunAutoSequence = 1;
+			RunAutoBatching = 1;
 		}
 	}
 }
 
 void RunAutoDispensing()
 {
-	if (digitalRead(loadFeedback) == false)
+	if (loadFeedbackFlag == true)
 	{
 		loadStatus = true;
 	}
-	else if (digitalRead(loadFeedback) == true && loadStatus == true)
+	else if (loadFeedbackFlag == false && loadStatus == true)
 	{
 		AfterDispenseTimer.start();
-		RunAutoSequence = 2;
+		RunAutoBatching = 2;
 	}
 }
 
@@ -332,8 +388,8 @@ void RunAutoAfterDispenseTimer()
 	AfterDispenseTimer.run();
 	if (AfterDispenseTimer.isTimerCompleted() == true)
 	{
-		Discharge.start();
-		RunAutoSequence = 3;
+		Serial.print("Done Timer");
+		RunAutoBatching = 3;
 	}
 }
 
@@ -342,23 +398,24 @@ void RunAutoLinearDischarge()
 	Discharge.run();
 	if (Discharge.isTimerCompleted() == true)
 	{
-		if (digitalRead(dischargeFeedback) == false)
+		if (dischargeFeedbackFlag == true)
 		{
-			RunAutoSequence = 4;
+			Serial.print("Discharge");
+			RunAutoBatching = 5;
 		}
 	}
 }
 
 void RunAutoDischarge()
 {
-	if (digitalRead(dischargeFeedback) == false)
+	if (dischargeFeedbackFlag == true)
 	{
 		dischargeStatus = true;
 	}
-	else if (digitalRead(dischargeFeedback) == true && dischargeStatus == true)
+	else if (dischargeFeedbackFlag == false && dischargeStatus == true)
 	{
 		AfterLinearTimer.start();
-		RunAutoSequence = 5;
+		RunAutoBatching = 6;
 	}
 }
 
@@ -367,10 +424,15 @@ void RunAutAfterDischargeTimer()
 	AfterLinearTimer.run();
 	if (AfterLinearTimer.isTimerCompleted() == true)
 	{
-		RunAutoSequence = 6;
+		RunAutoBatching = 0;
 		dischargeStatus = false;
 		loadStatus = false;
+		sealingDone = false;
+		sealingRunFlag = true;
+		Start.start();
+
 		Stepper.start();
+		RunAutoSequence = 0;
 	}
 }
 
@@ -381,7 +443,7 @@ void RunAutoStepper()
 	if (Stepper.isTimerCompleted() == true)
 	{
 		DisableStepper();
-		RunAutoSequence = 7;
+		RunAutoSequence = 1;
 		Sealer1.start();
 	}
 	else
@@ -398,7 +460,7 @@ void RunAutoUpperSeal()
 	if (Sealer1.isTimerCompleted() == true)
 	{
 		Sealer2.start();
-		RunAutoSequence = 8;
+		RunAutoSequence = 2;
 	}
 }
 void RunAutoLowerSeal()
@@ -408,7 +470,8 @@ void RunAutoLowerSeal()
 	if (Sealer2.isTimerCompleted() == true)
 	{
 		RunAutoSequence = 0;
-		Start.start();
+		sealingRunFlag = false;
+		sealingDone = true;
 	}
 }
 
@@ -817,7 +880,10 @@ void readButtonEnterState()
 					{
 						RunAutoFlag = true;
 						RunAutoSequence = 0;
+						RunAutoBatching = 0;
+						sealingRunFlag = false;
 						Start.start();
+						sealingDone = true;
 					}
 					else if (currentMainScreen == 2)
 					{
@@ -856,44 +922,43 @@ void printScreen()
 	}
 	else if (RunAutoFlag == true)
 	{
+		switch (RunAutoBatching)
+		{
+		case 0:
+			printRunAutoScreenUp("Run Auto", "Start Discharge", Start.getTimeRemaining());
+			break;
+		case 1:
+			printRunAutoScreenUp("Run Auto", "Dispensing", "N/A");
+			break;
+		case 2:
+			printRunAutoScreenUp("Run Auto", "Waiting", AfterDispenseTimer.getTimeRemaining());
+			break;
+		case 3:
+			printRunAutoScreenUp("Run Auto", "Waiting For Sealer", "N/A");
+			break;
+		case 4:
+			printRunAutoScreenUp("Run Auto", "Linear Door", Discharge.getTimeRemaining());
+			break;
+		case 5:
+			printRunAutoScreenUp("Run Auto", "Discharge", "N/A");
+			break;
+		case 6:
+			printRunAutoScreenUp("Run Auto", "Waiting", "N/A");
+		default:
+			break;
+		}
+
 		switch (RunAutoSequence)
 		{
 		case 0:
-			printRunAutoScreen("Run Auto", "Start Dispensing", Start.getTimeRemaining());
-			break;
-
-		case 1:
-			printRunAutoScreen("Run Auto", "Dispensing", "N/A");
-			break;
-
-		case 2:
-			printRunAutoScreen("Run Auto", "Waiting", AfterDispenseTimer.getTimeRemaining());
-			break;
-
-		case 3:
-			printRunAutoScreen("Run Auto", "Start Discharge", Discharge.getTimeRemaining());
-			break;
-
-		case 4:
-			printRunAutoScreen("Run Auto", "Discharging", "N/A");
-			break;
-
-		case 5:
-			printRunAutoScreen("Run Auto", "Waiting", AfterLinearTimer.getTimeRemaining());
-			break;
-
-		case 6:
 			printRunAutoScreen("Run Auto", "Roll Down", Stepper.getTimeRemaining());
 			break;
-
-		case 7:
+		case 1:
 			printRunAutoScreen("Run Auto", "Sealing Side", Sealer1.getTimeRemaining());
 			break;
-
-		case 8:
+		case 2:
 			printRunAutoScreen("Run Auto", "Sealing Middle", Sealer2.getTimeRemaining());
 			break;
-
 		default:
 			break;
 		}
@@ -947,14 +1012,17 @@ void printMainMenu(String MenuItem, String Action)
 
 void printRunAutoScreen(String SettingTitle, String Process, String TimeRemaining)
 {
-	lcd.clear();
-	lcd.print(SettingTitle);
-	lcd.setCursor(0, 1);
-	lcd.print(Process);
-
 	lcd.setCursor(0, 2);
-	lcd.print("Time Remaining:");
+	lcd.print(Process);
 	lcd.setCursor(0, 3);
+	lcd.print(TimeRemaining);
+	refreshScreen = false;
+}
+void printRunAutoScreenUp(String SettingTitle, String Process, String TimeRemaining)
+{
+	lcd.clear();
+	lcd.print(Process);
+	lcd.setCursor(0, 1);
 	lcd.print(TimeRemaining);
 	refreshScreen = false;
 }
@@ -1048,13 +1116,15 @@ void setup()
 	pinMode(buttonPin, INPUT_PULLUP);
 	pinMode(buttonPin2, INPUT_PULLUP);
 	pinMode(buttonPin3, INPUT_PULLUP);
-	pinMode(loadFeedback, INPUT_PULLUP);
-	pinMode(dischargeFeedback, INPUT_PULLUP);
+
+	loadFeedback.setDebounceTime(50);
+	dischargeFeedback.setDebounceTime(50);
 }
 
 void loop()
 {
 	InputReadandFeedback();
+	readFeedbackStatus();
 
 	if (refreshScreen == true)
 	{
@@ -1075,14 +1145,12 @@ void loop()
 	if (RunAutoFlag == true)
 	{
 		RunAuto();
-		if (RunAutoSequence != 0)
+
+		unsigned long currentMillis = millis();
+		if (currentMillis - previousMillis >= interval)
 		{
-			unsigned long currentMillis = millis();
-			if (currentMillis - previousMillis >= interval)
-			{
-				previousMillis = currentMillis;
-				refreshScreen = true;
-			}
+			previousMillis = currentMillis;
+			refreshScreen = true;
 		}
 	}
 }
